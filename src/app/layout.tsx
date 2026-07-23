@@ -17,6 +17,11 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "BookFlow — Smart Scheduling with Built-in Payments",
   description: "Book meetings. Collect payments. Done.",
+  openGraph: {
+    title: "BookFlow — Smart Scheduling with Built-in Payments",
+    description: "Booking pages with Stripe payments built in. Share your link, get booked, get paid.",
+    type: "website",
+  },
 };
 
 export default function RootLayout({
