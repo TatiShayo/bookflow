@@ -3,7 +3,7 @@
   "run_id": "hermes-2026-07-27-v6-bookflow",
   "project": "bookflow",
   "phase": "4.0",
-  "produced_at": "2026-07-27T22:28:38.036397",
+  "produced_at": "2026-07-27T22:29:36.093101",
   "runner_tier": "T1",
   "mode": "static-only",
   "findings": []
