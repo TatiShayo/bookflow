@@ -1,12 +1,15 @@
 import { createClient } from "@/lib/supabase/server";
 import { EventTypeForm } from "../event-type-form";
+import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
 export default async function NewEventTypePage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
+  if (!user) {
+    redirect("/login");
+  }
 
   return (
     <div className="max-w-2xl space-y-6">

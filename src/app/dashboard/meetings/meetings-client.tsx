@@ -7,10 +7,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
 import { formatDateTime } from "@/lib/slots";
 import { toast } from "sonner";
-import { Mail, X } from "lucide-react";
+import { X } from "lucide-react";
 
 interface BookingRow {
   id: string;
@@ -31,7 +30,6 @@ interface BookingRow {
 
 export function MeetingsClient({ bookings }: { bookings: BookingRow[] }) {
   const router = useRouter();
-  const supabase = createClient();
   const [cancelling, setCancelling] = useState<string | null>(null);
 
   const now = new Date();
@@ -45,19 +43,32 @@ export function MeetingsClient({ bookings }: { bookings: BookingRow[] }) {
   const cancelled = bookings.filter((b) => b.status === "cancelled");
 
   async function handleCancel(id: string) {
-    if (!confirm("Cancel this booking? An email will be sent to the attendee.")) return;
+    if (!confirm("Cancel this booking? An email notification will be sent to the attendee.")) return;
     setCancelling(id);
 
-    const res = await fetch(`/api/bookings/${id}/cancel`, { method: "POST" });
-    const json = await res.json();
+    try {
+      const res = await fetch(`/api/bookings/${id}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const json = await res.json();
 
-    if (json.error) {
-      toast.error(json.error);
-    } else {
-      toast.success("Booking cancelled");
-      router.refresh();
+      if (json.error) {
+        toast.error(json.error);
+      } else {
+        if (json.refund && json.refund.amount > 0) {
+          toast.success(`Booking cancelled. Refund of ${json.refund.currency} ${json.refund.amount} initiated.`);
+        } else {
+          toast.success("Booking cancelled successfully.");
+        }
+        router.refresh();
+      }
+    } catch {
+      toast.error("Failed to cancel booking. Please try again.");
+    } finally {
+      setCancelling(null);
     }
-    setCancelling(null);
   }
 
   function renderList(items: BookingRow[]) {
@@ -75,7 +86,7 @@ export function MeetingsClient({ bookings }: { bookings: BookingRow[] }) {
                     backgroundColor: `${b.event_types?.color || "#8b5cf6"}20`,
                     color: b.event_types?.color || "#8b5cf6",
                   }}
-                  className="text-sm"
+                  className="text-sm font-semibold"
                 >
                   {b.attendee_name.charAt(0).toUpperCase()}
                 </AvatarFallback>
@@ -98,17 +109,17 @@ export function MeetingsClient({ bookings }: { bookings: BookingRow[] }) {
               </div>
               <div className="text-right shrink-0 flex flex-col items-end gap-2">
                 <Badge variant={b.amount_paid > 0 ? "default" : "outline"}>
-                  {b.amount_paid > 0 ? `$${b.amount_paid}` : "Free"}
+                  {b.amount_paid > 0 ? `${b.currency || "USD"} ${b.amount_paid}` : "Free"}
                 </Badge>
                 {b.status === "confirmed" && new Date(b.start_time) > now && (
                   <Button
                     size="sm"
                     variant="ghost"
-                    className="h-7 text-xs text-destructive"
+                    className="h-7 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
                     onClick={() => handleCancel(b.id)}
                     disabled={cancelling === b.id}
                   >
-                    <X className="h-3 w-3 mr-1" /> Cancel
+                    <X className="h-3 w-3 mr-1" /> {cancelling === b.id ? "Cancelling..." : "Cancel"}
                   </Button>
                 )}
               </div>

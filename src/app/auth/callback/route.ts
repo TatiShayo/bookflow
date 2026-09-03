@@ -1,14 +1,15 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { sanitizeRedirectPath } from "@/lib/validation";
 
 export async function GET(request: NextRequest) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
-  const next = searchParams.get("next") ?? "/dashboard";
+  const rawNext = searchParams.get("next");
+  const next = sanitizeRedirectPath(rawNext, "/dashboard");
 
   if (code) {
-    const requestUrl = new URL(request.url);
     const response = NextResponse.redirect(new URL(next, request.url));
 
     const supabase = createServerClient(

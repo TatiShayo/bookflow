@@ -8,6 +8,7 @@ import { Separator } from "@/components/ui/separator";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { validateAvailabilityWindows } from "@/lib/validation";
 import { toast } from "sonner";
 import { Plus, Trash2, X } from "lucide-react";
 
@@ -84,10 +85,6 @@ export function AvailabilityClient({ userId, grouped, days, blocked }: Props) {
   async function handleSave() {
     setSaving(true);
 
-    // Delete all existing availability and blocked dates for this user, then re-insert
-    await supabase.from("availability").delete().eq("user_id", userId);
-    await supabase.from("blocked_dates").delete().eq("user_id", userId);
-
     const toInsert: { user_id: string; day_of_week: number; start_time: string; end_time: string; is_available: boolean }[] = [];
     for (const daySlots of Object.values(slots)) {
       for (const s of daySlots) {
@@ -100,6 +97,18 @@ export function AvailabilityClient({ userId, grouped, days, blocked }: Props) {
         });
       }
     }
+
+    // Validate availability windows
+    const validation = validateAvailabilityWindows(toInsert);
+    if (!validation.isValid) {
+      toast.error(validation.errors[0] || "Invalid availability window");
+      setSaving(false);
+      return;
+    }
+
+    // Delete all existing availability and blocked dates for this user, then re-insert
+    await supabase.from("availability").delete().eq("user_id", userId);
+    await supabase.from("blocked_dates").delete().eq("user_id", userId);
 
     if (toInsert.length > 0) {
       const { error: availErr } = await supabase.from("availability").insert(toInsert);

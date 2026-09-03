@@ -1,5 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { EventTypeForm } from "../../event-type-form";
 import type { EventType } from "@/lib/types";
 
@@ -13,9 +13,10 @@ export default async function EditEventTypePage({
   const { id } = await params;
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
+  if (!user) {
+    redirect("/login");
+  }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: raw } = await supabase
     .from("event_types")
     .select("*")

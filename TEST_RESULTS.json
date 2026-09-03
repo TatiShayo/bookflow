@@ -1,21 +1,88 @@
 {
   "schema": "hermes.tests.v6",
-  "run_id": "hermes-2026-07-27-v6-bookflow",
+  "run_id": "hermes-2026-08-14-v6-bookflow",
   "project": "bookflow",
-  "produced_at": "2026-07-27T22:52:13.222656",
+  "produced_at": "2026-08-14T10:50:02.000000",
   "summary": {
-    "status": "RUNNABLE",
-    "passed": 1,
+    "status": "PASS",
+    "passed": 106,
     "failed": 0,
     "skipped": 0,
-    "unrunnable": 0
+    "total_suites": 9,
+    "total_tests": 106
   },
   "suites": [
     {
-      "suite": "TypeScript Compilation",
-      "tool": "npx tsc --noEmit",
+      "suite": "src/lib/__tests__/slots.test.ts",
+      "tool": "vitest",
       "status": "PASS",
-      "exit_code": 0
+      "tests": 16,
+      "passed": 16,
+      "failed": 0
+    },
+    {
+      "suite": "src/lib/__tests__/concurrency-overlapping.test.ts",
+      "tool": "vitest",
+      "status": "PASS",
+      "tests": 12,
+      "passed": 12,
+      "failed": 0
+    },
+    {
+      "suite": "src/lib/__tests__/timezone-dst.test.ts",
+      "tool": "vitest",
+      "status": "PASS",
+      "tests": 16,
+      "passed": 16,
+      "failed": 0
+    },
+    {
+      "suite": "src/lib/__tests__/constants-utils.test.ts",
+      "tool": "vitest",
+      "status": "PASS",
+      "tests": 10,
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "suite": "src/lib/__tests__/cancellation.test.ts",
+      "tool": "vitest",
+      "status": "PASS",
+      "tests": 15,
+      "passed": 15,
+      "failed": 0
+    },
+    {
+      "suite": "src/lib/__tests__/scheduling-edge-cases.test.ts",
+      "tool": "vitest",
+      "status": "PASS",
+      "tests": 5,
+      "passed": 5,
+      "failed": 0
+    },
+    {
+      "suite": "src/lib/__tests__/validation.test.ts",
+      "tool": "vitest",
+      "status": "PASS",
+      "tests": 20,
+      "passed": 20,
+      "failed": 0
+    },
+    {
+      "suite": "src/lib/__tests__/stripe-webhooks.test.ts",
+      "tool": "vitest",
+      "status": "PASS",
+      "tests": 6,
+      "passed": 6,
+      "failed": 0
+    },
+    {
+      "suite": "src/lib/__tests__/auth-security.test.ts",
+      "tool": "vitest",
+      "status": "PASS",
+      "tests": 6,
+      "passed": 6,
+      "failed": 0
     }
   ]
 }

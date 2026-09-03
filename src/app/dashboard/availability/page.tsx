@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { AvailabilityClient } from "./availability-client";
 import { DAYS } from "@/lib/constants";
+import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
@@ -23,7 +24,9 @@ interface BlockedDateRow {
 export default async function AvailabilityPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
+  if (!user) {
+    redirect("/login");
+  }
 
   const [{ data: avail }, { data: blocked }] = await Promise.all([
     supabase.from("availability").select("*").eq("user_id", user.id).order("day_of_week"),
@@ -33,7 +36,9 @@ export default async function AvailabilityPage() {
   const grouped: Record<number, TimeSlotRow[]> = {};
   for (let i = 0; i < 7; i++) grouped[i] = [];
   for (const row of (avail || []) as TimeSlotRow[]) {
-    grouped[row.day_of_week]?.push(row);
+    if (grouped[row.day_of_week]) {
+      grouped[row.day_of_week].push(row);
+    }
   }
 
   return (

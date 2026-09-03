@@ -29,7 +29,7 @@ interface Props {
 }
 
 export function DashboardClient({ username, todayTotal, weekRevenue, monthTotal, cancelPercent, upcomingBookings, chartData }: Props) {
-  const bookingLink = typeof window !== "undefined" ? `${window.location.origin}/book/${username}` : "/book/";
+  const bookingLink = typeof window !== "undefined" ? `${window.location.origin}/book/${username}` : `/book/${username}`;
 
   return (
     <div className="space-y-8">
@@ -130,7 +130,7 @@ export function DashboardClient({ username, todayTotal, weekRevenue, monthTotal,
                     </p>
                   </div>
                   <Badge variant={b.amount_paid > 0 ? "default" : "outline"}>
-                    {b.amount_paid > 0 ? `Paid $${b.amount_paid}` : "Free"}
+                    {b.amount_paid > 0 ? `${b.currency || "USD"} ${b.amount_paid}` : "Free"}
                   </Badge>
                 </div>
               ))}

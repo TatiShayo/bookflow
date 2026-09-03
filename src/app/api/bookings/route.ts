@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { sendBookingConfirmation, sendHostNotification } from "@/lib/resend";
-import { generateSlots } from "@/lib/slots";
-import { parseISO, addMinutes } from "date-fns";
+import { generateSlots, getZonedDateString, isValidTimezone } from "@/lib/slots";
+import { validateBookingInput } from "@/lib/validation";
+import { parseISO, isValid } from "date-fns";
 import type { Availability, Booking, EventType, Profile } from "@/lib/types";
 import { stripe } from "@/lib/stripe";
 
@@ -10,76 +11,124 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const {
-      eventTypeId, attendeeName, attendeeEmail, attendeePhone,
-      startTime, endTime, notes, stripePaymentIntentId, amountPaid, currency,
+      eventTypeId,
+      attendeeName,
+      attendeeEmail,
+      attendeePhone,
+      startTime,
+      endTime,
+      notes,
+      stripePaymentIntentId,
+      amountPaid,
+      currency,
     } = body;
-
-    if (!eventTypeId || !attendeeName || !attendeeEmail || !startTime || !endTime) {
-      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
-    }
 
     const supabase = createServiceClient();
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data: rawEvent } = await supabase
+    // 1. Fetch Event Type
+    if (!eventTypeId || typeof eventTypeId !== "string") {
+      return NextResponse.json({ error: "Event type ID is required" }, { status: 400 });
+    }
+
+    const { data: rawEvent, error: eventError } = await supabase
       .from("event_types")
       .select("*")
       .eq("id", eventTypeId)
       .eq("is_active", true)
       .single();
-    const eventType = rawEvent as any;
-    if (!eventType) return NextResponse.json({ error: "Event type not found" }, { status: 404 });
 
-    // Get host profile to get timezone and name
+    if (eventError || !rawEvent) {
+      return NextResponse.json({ error: "Event type not found or inactive" }, { status: 404 });
+    }
+    const eventType = rawEvent as unknown as EventType;
+
+    // 2. Validate booking inputs
+    const validation = validateBookingInput(
+      {
+        eventTypeId,
+        attendeeName,
+        attendeeEmail,
+        startTime,
+        endTime,
+        attendeePhone,
+        notes,
+        amountPaid: Number(amountPaid) || 0,
+        currency,
+        stripePaymentIntentId,
+      },
+      eventType.duration_minutes
+    );
+
+    if (!validation.isValid) {
+      return NextResponse.json(
+        { error: "Validation failed", details: validation.errors },
+        { status: 400 }
+      );
+    }
+
+    // 3. Get Host Profile to check Timezone & Email
     const { data: rawHost } = await supabase
       .from("profiles")
-      .select("display_name, timezone")
+      .select("id, display_name, timezone")
       .eq("id", eventType.user_id)
       .single();
-    const hostProfile = rawHost as any;
+
+    const hostProfile = rawHost as unknown as Profile | null;
     if (!hostProfile) {
       return NextResponse.json({ error: "Host profile not found" }, { status: 404 });
     }
 
-    const hostTimezone = hostProfile.timezone || "UTC";
+    const hostTimezone = isValidTimezone(hostProfile.timezone) ? hostProfile.timezone : "UTC";
 
-    // Timezone-aware blocked dates checking
-    const startDate = new Date(startTime);
-    const blockedDateStr = new Intl.DateTimeFormat("en-CA", {
-      timeZone: hostTimezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).format(startDate);
+    // 4. Timezone-aware Blocked Dates Check
+    const startDate = parseISO(startTime);
+    if (!isValid(startDate)) {
+      return NextResponse.json({ error: "Invalid start time date format" }, { status: 400 });
+    }
 
+    const blockedDateStr = getZonedDateString(startDate, hostTimezone);
     const { data: blockedDate } = await supabase
       .from("blocked_dates")
-      .select("*")
+      .select("id")
       .eq("user_id", eventType.user_id)
       .eq("blocked_date", blockedDateStr)
       .maybeSingle();
 
     if (blockedDate) {
-      return NextResponse.json({ error: "This date is blocked." }, { status: 409 });
+      return NextResponse.json({ error: "This date is blocked by the host." }, { status: 409 });
     }
 
+    // 5. Fetch host availability
     const { data: rawAvail } = await supabase
       .from("availability")
       .select("*")
       .eq("user_id", eventType.user_id);
 
-    const date = parseISO(startTime);
-    const { data: rawBookings } = await supabase
-      .from("bookings")
-      .select("start_time, end_time, status")
-      .eq("event_type_id", eventTypeId)
-      .neq("status", "cancelled");
+    // 6. Fetch ALL event types for this host to prevent cross-event double bookings
+    const { data: rawHostEvents } = await supabase
+      .from("event_types")
+      .select("id")
+      .eq("user_id", eventType.user_id);
 
+    const hostEventTypeIds = (rawHostEvents || []).map((e: { id: string }) => e.id);
+
+    let rawBookings: unknown[] = [];
+    if (hostEventTypeIds.length > 0) {
+      const { data: bookingsData } = await supabase
+        .from("bookings")
+        .select("id, start_time, end_time, status, event_type_id, event_types(buffer_before_minutes, buffer_after_minutes)")
+        .in("event_type_id", hostEventTypeIds)
+        .neq("status", "cancelled");
+      rawBookings = bookingsData || [];
+    }
+
+    // 7. Verify slot availability with buffer & max_bookings_per_day
     const slots = generateSlots(
-      date,
-      (rawAvail || []) as Availability[],
-      (rawBookings || []) as Booking[],
-      eventType as EventType
+      startDate,
+      (rawAvail || []) as unknown as Availability[],
+      (rawBookings || []) as unknown as Booking[],
+      eventType,
+      { timezone: hostTimezone }
     );
 
     const requestedStart = parseISO(startTime);
@@ -89,34 +138,34 @@ export async function POST(req: NextRequest) {
     );
 
     if (!slotAvailable) {
-      return NextResponse.json({ error: "This time slot is no longer available." }, { status: 409 });
+      return NextResponse.json(
+        { error: "This time slot is no longer available." },
+        { status: 409 }
+      );
     }
 
-    // Check max bookings per day
-    if (eventType.max_bookings_per_day) {
-      const dateStr = date.toISOString().split("T")[0];
-      const nextDay = new Date(date.getTime() + 86400000).toISOString().split("T")[0];
-      const { count } = await supabase
-        .from("bookings")
-        .select("id", { count: "exact" })
-        .eq("event_type_id", eventTypeId)
-        .eq("status", "confirmed")
-        .gte("start_time", dateStr)
-        .lt("start_time", nextDay);
+    // 8. Enforce Max Bookings Per Day if set
+    if (eventType.max_bookings_per_day && eventType.max_bookings_per_day > 0) {
+      const targetDateStr = getZonedDateString(startDate, hostTimezone);
+      const activeBookingsCount = (rawBookings as unknown as Booking[]).filter((b) => {
+        if (b.status === "cancelled") return false;
+        const bDate = parseISO(b.start_time);
+        return isValid(bDate) && getZonedDateString(bDate, hostTimezone) === targetDateStr;
+      }).length;
 
-      if ((count || 0) >= eventType.max_bookings_per_day) {
+      if (activeBookingsCount >= eventType.max_bookings_per_day) {
         return NextResponse.json({ error: "This day is fully booked." }, { status: 409 });
       }
     }
 
-    // Stripe Payment Verification & Replay Protection
-    let verifiedPaymentIntentId = null;
+    // 9. Stripe Payment Verification & Replay Protection
+    let verifiedPaymentIntentId: string | null = null;
     let verifiedAmountPaid = 0;
-    let verifiedCurrency = "USD";
+    let verifiedCurrency = eventType.currency || "USD";
 
     if (eventType.price > 0) {
-      if (!stripePaymentIntentId) {
-        return NextResponse.json({ error: "Missing stripePaymentIntentId for paid event." }, { status: 400 });
+      if (!stripePaymentIntentId || typeof stripePaymentIntentId !== "string") {
+        return NextResponse.json({ error: "Payment is required for this booking." }, { status: 400 });
       }
 
       let paymentIntent;
@@ -144,71 +193,93 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "Payment intent event type mismatch." }, { status: 400 });
       }
 
-      const { data: existingBooking } = await supabase
+      // Check if PaymentIntent was already attached to a booking
+      const { data: existingPaymentBooking } = await supabase
         .from("bookings")
         .select("id")
         .eq("stripe_payment_intent_id", stripePaymentIntentId)
         .maybeSingle();
 
-      if (existingBooking) {
-        return NextResponse.json({ error: "This payment has already been used for a booking." }, { status: 409 });
+      if (existingPaymentBooking) {
+        return NextResponse.json(
+          { error: "This payment has already been used for another booking." },
+          { status: 409 }
+        );
       }
 
       verifiedPaymentIntentId = stripePaymentIntentId;
       verifiedAmountPaid = eventType.price;
       verifiedCurrency = eventType.currency;
     } else {
-      // Free events: explicitly ignore client-provided stripePaymentIntentId, amountPaid and currency fields
       verifiedPaymentIntentId = null;
       verifiedAmountPaid = 0;
-      verifiedCurrency = "USD";
+      verifiedCurrency = eventType.currency || "USD";
     }
 
-    // Create booking
-    const { data: rawBooking, error: bookingError } = await supabase
-      .from("bookings")
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // 10. Atomic Insert of the Booking
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data: rawBooking, error: bookingError } = await (supabase.from("bookings") as any)
       .insert({
         event_type_id: eventTypeId,
-        attendee_name: attendeeName,
-        attendee_email: attendeeEmail,
-        attendee_phone: attendeePhone || null,
+        attendee_name: attendeeName.trim(),
+        attendee_email: attendeeEmail.trim().toLowerCase(),
+        attendee_phone: attendeePhone?.trim() || null,
         start_time: startTime,
         end_time: endTime,
         status: "confirmed",
         stripe_payment_intent_id: verifiedPaymentIntentId,
         amount_paid: verifiedAmountPaid,
         currency: verifiedCurrency,
-        notes: notes || null,
+        notes: notes ? String(notes).trim().substring(0, 500) : null,
         meeting_link: eventType.location_value || null,
-      } as any)
+      })
       .select("*")
       .single();
 
     if (bookingError || !rawBooking) {
       console.error("Booking insert error:", bookingError);
+      if (bookingError?.code === "23505") {
+        return NextResponse.json(
+          { error: "This time slot or payment was already booked concurrently." },
+          { status: 409 }
+        );
+      }
       return NextResponse.json({ error: "Failed to create booking" }, { status: 500 });
     }
-    const booking = rawBooking as any;
 
-    const dateStr = parseISO(startTime).toLocaleDateString("en-US", {
-      weekday: "long", month: "long", day: "numeric", year: "numeric",
-    });
-    const timeStr = parseISO(startTime).toLocaleTimeString("en-US", {
-      hour: "numeric", minute: "2-digit", timeZoneName: "short",
-    });
+    const booking = rawBooking as unknown as Booking;
 
-    Promise.all([
-      sendBookingConfirmation(attendeeEmail, {
-        attendeeName, hostName: hostProfile?.display_name || "Host",
-        eventTitle: eventType.title, date: dateStr, time: timeStr,
+    // 11. Send Confirmation and Notification Emails Asynchronously
+    const dateFormatted = new Intl.DateTimeFormat("en-US", {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+      timeZone: hostTimezone,
+    }).format(startDate);
+
+    const timeFormatted = new Intl.DateTimeFormat("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      timeZone: hostTimezone,
+      timeZoneName: "short",
+    }).format(startDate);
+
+    Promise.allSettled([
+      sendBookingConfirmation(attendeeEmail.trim(), {
+        attendeeName: attendeeName.trim(),
+        hostName: hostProfile.display_name || "Host",
+        eventTitle: eventType.title,
+        date: dateFormatted,
+        time: timeFormatted,
         duration: eventType.duration_minutes,
         joinLink: eventType.location_value || undefined,
-        amount: verifiedAmountPaid || undefined, currency: verifiedCurrency || undefined,
-      }).catch((e) => console.error("Attendee email failed:", e)),
-    ]);
+        amount: verifiedAmountPaid || undefined,
+        currency: verifiedCurrency || undefined,
+      }),
+    ]).catch((e) => console.error("Email delivery error:", e));
 
-    return NextResponse.json({ booking });
+    return NextResponse.json({ booking }, { status: 201 });
   } catch (err) {
     console.error("Booking API error:", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });

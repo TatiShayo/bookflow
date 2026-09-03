@@ -2,15 +2,17 @@ import { createClient } from "@/lib/supabase/server";
 import { EventTypesClient } from "./events-client";
 import { FREE_TIER_EVENT_LIMIT } from "@/lib/constants";
 import type { EventType } from "@/lib/types";
+import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
 export default async function EventTypesPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
+  if (!user) {
+    redirect("/login");
+  }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: rawProfile } = await supabase
     .from("profiles")
     .select("subscription_tier, username, display_name")

@@ -1,19 +1,23 @@
 import { createClient } from "@/lib/supabase/server";
 import { AnalyticsClient } from "./analytics-client";
+import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
 export default async function AnalyticsPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
+  if (!user) {
+    redirect("/login");
+  }
 
   const { data: raw } = await supabase
     .from("bookings")
     .select("*, event_types!inner(title, color)")
     .eq("event_types.user_id", user.id)
     .eq("status", "confirmed")
-    .order("start_time", { ascending: true });
+    .order("start_time", { ascending: true })
+    .limit(500);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const bookings = (raw || []) as any[];

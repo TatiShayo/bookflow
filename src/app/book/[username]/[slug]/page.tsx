@@ -13,7 +13,6 @@ export default async function BookEventPage({
   const { username, slug } = await params;
   const supabase = createServiceClient();
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data: rawProfile } = await supabase
     .from("profiles")
     .select("*")
@@ -43,11 +42,23 @@ export default async function BookEventPage({
     .select("blocked_date")
     .eq("user_id", profile.id as string);
 
-  const { data: rawBookings } = await supabase
-    .from("bookings")
-    .select("start_time, end_time, status")
-    .eq("event_type_id", eventType.id as string)
-    .neq("status", "cancelled");
+  // Fetch all event types of the host to include all their bookings for conflict prevention
+  const { data: allHostEvents } = await supabase
+    .from("event_types")
+    .select("id")
+    .eq("user_id", profile.id as string);
+
+  const hostEventTypeIds = (allHostEvents || []).map((e: { id: string }) => e.id);
+
+  let rawBookings: unknown[] = [];
+  if (hostEventTypeIds.length > 0) {
+    const { data: bookingsData } = await supabase
+      .from("bookings")
+      .select("id, start_time, end_time, status, event_type_id, event_types(buffer_before_minutes, buffer_after_minutes)")
+      .in("event_type_id", hostEventTypeIds)
+      .neq("status", "cancelled");
+    rawBookings = bookingsData || [];
+  }
 
   const blocked = new Set(((rawBlocked || []) as Array<Record<string, unknown>>).map((b) => b.blocked_date as string));
 

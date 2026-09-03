@@ -1,12 +1,15 @@
 import { createClient } from "@/lib/supabase/server";
 import { DashboardClient } from "./dashboard-client";
+import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return null;
+  if (!user) {
+    redirect("/login");
+  }
 
   const { data: rawProfile } = await supabase
     .from("profiles")
@@ -29,6 +32,20 @@ export default async function DashboardPage() {
     .select("id")
     .eq("user_id", user.id);
   const eventTypeIds = (userEventTypes || []).map((et: Record<string, unknown>) => et.id as string);
+
+  if (eventTypeIds.length === 0) {
+    return (
+      <DashboardClient
+        username={username}
+        todayTotal={0}
+        weekRevenue={0}
+        monthTotal={0}
+        cancelPercent={0}
+        upcomingBookings={[]}
+        chartData={[]}
+      />
+    );
+  }
 
   const [
     { data: todayBookings },

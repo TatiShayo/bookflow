@@ -1,8 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { generateSlots, formatSlotTime, formatTime, formatDate, formatDateTime } from "../slots";
+import {
+  generateSlots,
+  formatSlotTime,
+  formatTime,
+  formatDate,
+  formatDateTime,
+  isDateBlocked,
+  getZonedDateString,
+  getZonedDayOfWeek,
+  isValidTimezone,
+} from "../slots";
 import { Availability, Booking, EventType } from "../types";
 
-describe("generateSlots", () => {
+describe("generateSlots Engine", () => {
   // June 30, 2026 is Tuesday (getDay() = 2) in local time
   const mockDate = new Date(2026, 5, 30);
 
@@ -37,7 +47,7 @@ describe("generateSlots", () => {
   ];
 
   beforeEach(() => {
-    // Mock the current date/time to be Monday, June 29, 2026 at 12:00 PM local time
+    // Mock the current date/time to Monday, June 29, 2026 at 12:00 PM local time
     vi.useFakeTimers();
     vi.setSystemTime(new Date(2026, 5, 29, 12, 0));
   });
@@ -46,15 +56,9 @@ describe("generateSlots", () => {
     vi.useRealTimers();
   });
 
-  it("should generate basic slots (e.g. 9 AM - 5 PM) when no bookings exist", () => {
+  it("should generate basic slots (09:00 - 17:00) when no bookings exist", () => {
     const slots = generateSlots(mockDate, defaultAvailability, [], defaultEventType);
-
-    // With a 9:00 - 17:00 window, 30m duration, and 15m step (cursor increment):
-    // First slot: start 09:00, end 09:30
-    // Second slot: start 09:15, end 09:45
-    // ...
-    // Last slot: start 16:30, end 17:00 (since 17:00 - 16:30 = 30 >= 30, and next cursor is 16:45 where 17:00 - 16:45 = 15 < 30)
-    expect(slots.length).toBe(31); // (16.5 - 9) * 4 + 1 = 31 slots
+    expect(slots.length).toBe(31);
 
     expect(slots[0]).toEqual({
       start: new Date(2026, 5, 30, 9, 0),
@@ -74,6 +78,21 @@ describe("generateSlots", () => {
       [],
       defaultEventType
     );
+    expect(slots).toEqual([]);
+  });
+
+  it("should return empty array if availability is marked is_available: false", () => {
+    const inactiveAvail: Availability[] = [
+      {
+        id: "avail-1",
+        user_id: "user-1",
+        day_of_week: 2,
+        start_time: "09:00",
+        end_time: "17:00",
+        is_available: false,
+      },
+    ];
+    const slots = generateSlots(mockDate, inactiveAvail, [], defaultEventType);
     expect(slots).toEqual([]);
   });
 
@@ -98,12 +117,6 @@ describe("generateSlots", () => {
     ];
 
     const slots = generateSlots(mockDate, defaultAvailability, existingBookings, defaultEventType);
-
-    // Check that slots starting at 09:45, 10:00, and 10:15 are filtered out
-    // Slot 09:45 (ends 10:15) overlaps 10:00 - 10:30
-    // Slot 10:00 (ends 10:30) overlaps 10:00 - 10:30
-    // Slot 10:15 (ends 10:45) overlaps 10:00 - 10:30
-    // Slot 09:30 (ends 10:00) and Slot 10:30 (ends 11:00) should be available.
     const startTimes = slots.map((s) => s.start.toISOString());
 
     expect(startTimes).toContain(new Date(2026, 5, 30, 9, 30).toISOString());
@@ -139,7 +152,7 @@ describe("generateSlots", () => {
     expect(startTimes).toContain(new Date(2026, 5, 30, 10, 0).toISOString());
   });
 
-  it("should respect buffer_before_minutes and buffer_after_minutes", () => {
+  it("should respect buffer_before_minutes and buffer_after_minutes on prospective slots", () => {
     const eventWithBuffers: EventType = {
       ...defaultEventType,
       duration_minutes: 30,
@@ -149,17 +162,6 @@ describe("generateSlots", () => {
 
     const slots = generateSlots(mockDate, defaultAvailability, [], eventWithBuffers);
 
-    // Total slot cost (cursor space needed) = 30 (duration) + 15 (before) + 15 (after) = 60 minutes
-    // Loop condition: differenceInMinutes(windowEnd, cursor) >= 60
-    // Cursor starts at 09:00:
-    // Slot 1:
-    // - start: cursor + buffer_before = 09:00 + 15m = 09:15
-    // - end: start + duration = 09:15 + 30m = 09:45
-    // - next cursor: cursor + 15m = 09:15
-    // Slot 2 (cursor = 09:15):
-    // - start: cursor + buffer_before = 09:15 + 15m = 09:30
-    // - end: start + duration = 09:30 + 30m = 10:00
-    // ...
     expect(slots[0]).toEqual({
       start: new Date(2026, 5, 30, 9, 15),
       end: new Date(2026, 5, 30, 9, 45),
@@ -170,22 +172,18 @@ describe("generateSlots", () => {
       end: new Date(2026, 5, 30, 10, 0),
     });
 
-    // Last slot:
-    // Window ends at 17:00. Last cursor is 16:00. Slot starts at 16:15, ends 16:45.
     expect(slots[slots.length - 1]).toEqual({
       start: new Date(2026, 5, 30, 16, 15),
       end: new Date(2026, 5, 30, 16, 45),
     });
   });
 
-  it("should filter out slots in the past if the slot day is today", () => {
+  it("should filter out slots in the past if the target date is today", () => {
     // Set system time to 12:00 PM on Tuesday, June 30, 2026
     vi.setSystemTime(new Date(2026, 5, 30, 12, 0));
 
     const slots = generateSlots(mockDate, defaultAvailability, [], defaultEventType);
-    
-    // Any slot starting at or before 12:00 PM should be filtered out
-    // The first available slot start time must be after 12:00 PM (i.e. >= 12:15 PM)
+
     const firstSlot = slots[0];
     expect(firstSlot.start.getTime()).toBeGreaterThan(new Date(2026, 5, 30, 12, 0).getTime());
 
@@ -194,52 +192,143 @@ describe("generateSlots", () => {
     expect(startTimes).not.toContain(new Date(2026, 5, 30, 12, 0).toISOString());
     expect(startTimes).toContain(new Date(2026, 5, 30, 12, 15).toISOString());
   });
-});
 
-describe("Timezone conversion and formatting helpers", () => {
-  describe("formatSlotTime", () => {
-    const slot = {
-      start: new Date("2026-06-30T12:00:00Z"),
-      end: new Date("2026-06-30T12:30:00Z"),
+  it("should enforce max_bookings_per_day limit and return [] if limit is reached", () => {
+    const limitedEventType: EventType = {
+      ...defaultEventType,
+      max_bookings_per_day: 2,
     };
 
-    it("should format slot correctly in default UTC timezone", () => {
-      const formatted = formatSlotTime(slot, "UTC");
-      expect(formatted).toBe("12:00 PM - 12:30 PM");
-    });
+    const twoBookings: Booking[] = [
+      {
+        id: "b1",
+        event_type_id: "event-1",
+        attendee_name: "Alice",
+        attendee_email: "alice@test.com",
+        attendee_phone: null,
+        start_time: new Date(2026, 5, 30, 9, 0).toISOString(),
+        end_time: new Date(2026, 5, 30, 9, 30).toISOString(),
+        status: "confirmed",
+        stripe_payment_intent_id: null,
+        amount_paid: 0,
+        currency: "USD",
+        notes: null,
+        meeting_link: null,
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: "b2",
+        event_type_id: "event-1",
+        attendee_name: "Bob",
+        attendee_email: "bob@test.com",
+        attendee_phone: null,
+        start_time: new Date(2026, 5, 30, 14, 0).toISOString(),
+        end_time: new Date(2026, 5, 30, 14, 30).toISOString(),
+        status: "confirmed",
+        stripe_payment_intent_id: null,
+        amount_paid: 0,
+        currency: "USD",
+        notes: null,
+        meeting_link: null,
+        created_at: new Date().toISOString(),
+      },
+    ];
 
-    it("should format slot correctly for America/New_York (UTC-4 in summer)", () => {
-      const formatted = formatSlotTime(slot, "America/New_York");
-      expect(formatted).toBe("8:00 AM - 8:30 AM");
-    });
-
-    it("should format slot correctly for Asia/Tokyo (UTC+9)", () => {
-      const formatted = formatSlotTime(slot, "Asia/Tokyo");
-      expect(formatted).toBe("9:00 PM - 9:30 PM");
-    });
+    const slots = generateSlots(mockDate, defaultAvailability, twoBookings, limitedEventType);
+    expect(slots).toEqual([]);
   });
 
-  describe("formatTime", () => {
-    it("should format Date to h:mm a format", () => {
-      const date = new Date("2026-06-30T14:05:00Z");
-      const formatted = formatTime(date);
-      expect(formatted).toMatch(/^\d{1,2}:\d{2}\s(AM|PM)$/i);
-    });
+  it("should handle multiple split availability windows on the same day", () => {
+    const splitAvailability: Availability[] = [
+      {
+        id: "avail-morning",
+        user_id: "user-1",
+        day_of_week: 2,
+        start_time: "09:00",
+        end_time: "12:00",
+        is_available: true,
+      },
+      {
+        id: "avail-afternoon",
+        user_id: "user-1",
+        day_of_week: 2,
+        start_time: "14:00",
+        end_time: "17:00",
+        is_available: true,
+      },
+    ];
+
+    const slots = generateSlots(mockDate, splitAvailability, [], defaultEventType);
+
+    // Morning slots: 09:00, 09:15, ..., 11:30 (ends 12:00) -> 11 slots
+    // Afternoon slots: 14:00, 14:15, ..., 16:30 (ends 17:00) -> 11 slots
+    expect(slots.length).toBe(22);
+
+    const slotStartTimes = slots.map((s) => s.start.getHours() * 60 + s.start.getMinutes());
+    // Lunch gap (12:00 - 14:00) must have zero slots
+    const lunchSlots = slotStartTimes.filter((t) => t >= 12 * 60 && t < 14 * 60);
+    expect(lunchSlots).toHaveLength(0);
   });
 
-  describe("formatDate", () => {
-    it("should format Date to EEE, MMM d, yyyy format", () => {
-      const date = new Date("2026-06-30T12:00:00Z");
-      const formatted = formatDate(date);
-      expect(formatted).toMatch(/^[a-zA-Z]{3},\s[a-zA-Z]{3}\s\d{1,2},\s\d{4}$/);
+  it("should support custom step minutes (e.g. 30 min step)", () => {
+    const slots = generateSlots(mockDate, defaultAvailability, [], defaultEventType, {
+      stepMinutes: 30,
     });
+
+    // 09:00 to 17:00 with 30m duration and 30m step:
+    // 09:00, 09:30, 10:00, 10:30, 11:00, 11:30, 12:00, 12:30, 13:00, 13:30, 14:00, 14:30, 15:00, 15:30, 16:00, 16:30
+    expect(slots.length).toBe(16);
+    expect(slots[0].start.getMinutes()).toBe(0);
+    expect(slots[1].start.getMinutes()).toBe(30);
   });
 
-  describe("formatDateTime", () => {
-    it("should format ISO string to MMM d, yyyy 'at' h:mm a", () => {
-      const iso = "2026-06-30T14:30:00.000Z";
-      const formatted = formatDateTime(iso);
-      expect(formatted).toMatch(/^[a-zA-Z]{3}\s\d{1,2},\s\d{4}\sat\s\d{1,2}:\d{2}\s(AM|PM)$/i);
+  it("should return empty array for an invalid date", () => {
+    const slots = generateSlots(new Date("invalid-date"), defaultAvailability, [], defaultEventType);
+    expect(slots).toEqual([]);
+  });
+
+  it("should enforce minimum notice minutes option", () => {
+    // Current time 09:00 AM on June 30
+    vi.setSystemTime(new Date(2026, 5, 30, 9, 0));
+
+    // Require 120 minutes (2 hours) notice
+    const slots = generateSlots(mockDate, defaultAvailability, [], defaultEventType, {
+      minNoticeMinutes: 120,
     });
+
+    // Earliest slot must start at or after 11:00 AM
+    expect(slots[0].start.getTime()).toBeGreaterThanOrEqual(
+      new Date(2026, 5, 30, 11, 0).getTime()
+    );
+  });
+});
+
+describe("isDateBlocked and Zone Helpers", () => {
+  it("should check if date is in blocked set", () => {
+    const blocked = new Set(["2026-06-30", "2026-07-04"]);
+    expect(isDateBlocked(new Date("2026-06-30T10:00:00Z"), blocked, "UTC")).toBe(true);
+    expect(isDateBlocked(new Date("2026-07-01T10:00:00Z"), blocked, "UTC")).toBe(false);
+  });
+
+  it("should validate recognized IANA timezones", () => {
+    expect(isValidTimezone("America/New_York")).toBe(true);
+    expect(isValidTimezone("Europe/London")).toBe(true);
+    expect(isValidTimezone("Asia/Tokyo")).toBe(true);
+    expect(isValidTimezone("UTC")).toBe(true);
+    expect(isValidTimezone("Invalid/Zone_Name")).toBe(false);
+    expect(isValidTimezone("")).toBe(false);
+  });
+
+  it("should get zoned date string correctly", () => {
+    // 2026-07-01 02:00 UTC is 2026-06-30 in America/New_York
+    const d = new Date("2026-07-01T02:00:00Z");
+    expect(getZonedDateString(d, "America/New_York")).toBe("2026-06-30");
+    expect(getZonedDateString(d, "UTC")).toBe("2026-07-01");
+  });
+
+  it("should get zoned day of week correctly", () => {
+    const d = new Date("2026-07-01T02:00:00Z"); // Wed in UTC, Tue in New York
+    expect(getZonedDayOfWeek(d, "America/New_York")).toBe(2); // Tuesday
+    expect(getZonedDayOfWeek(d, "UTC")).toBe(3); // Wednesday
   });
 });

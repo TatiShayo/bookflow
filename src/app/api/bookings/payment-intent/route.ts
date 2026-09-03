@@ -1,24 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
 import { stripe } from "@/lib/stripe";
 import { createServiceClient } from "@/lib/supabase/server";
+import { isValidEmail } from "@/lib/validation";
 
 export async function POST(req: NextRequest) {
   try {
-    const { eventTypeId, attendeeEmail, attendeeName, startTime, endTime, attendeePhone, notes } = await req.json();
+    const body = await req.json();
+    const { eventTypeId, attendeeEmail, attendeeName, startTime, endTime, attendeePhone, notes } = body;
 
-    if (!eventTypeId) {
-      return NextResponse.json({ error: "Missing eventTypeId" }, { status: 400 });
+    if (!eventTypeId || typeof eventTypeId !== "string") {
+      return NextResponse.json({ error: "Missing or invalid eventTypeId" }, { status: 400 });
     }
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!attendeeEmail || typeof attendeeEmail !== "string" || !emailRegex.test(attendeeEmail)) {
-      return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
+    if (!attendeeEmail || !isValidEmail(attendeeEmail)) {
+      return NextResponse.json({ error: "Valid email address is required" }, { status: 400 });
+    }
+
+    if (!startTime || !endTime) {
+      return NextResponse.json({ error: "Start time and end time are required" }, { status: 400 });
     }
 
     const supabase = createServiceClient();
     const { data: rawEvent, error: eventTypeError } = await supabase
       .from("event_types")
-      .select("price, currency")
+      .select("id, price, currency, is_active, title, user_id")
       .eq("id", eventTypeId)
       .single();
 
@@ -26,24 +31,44 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Event type not found" }, { status: 404 });
     }
 
-    const eventType = rawEvent as any;
+    const eventType = rawEvent as {
+      id: string;
+      price: number;
+      currency: string;
+      is_active: boolean;
+      title: string;
+      user_id: string;
+    };
+
+    if (!eventType.is_active) {
+      return NextResponse.json({ error: "This event type is currently not active" }, { status: 400 });
+    }
+
     const price = Number(eventType.price || 0);
-    const currency = eventType.currency || "USD";
-    const truncatedNotes = notes ? String(notes).substring(0, 450) : "";
+    if (price <= 0) {
+      return NextResponse.json(
+        { error: "Event type is free. No payment intent required." },
+        { status: 400 }
+      );
+    }
+
+    const currency = (eventType.currency || "USD").toLowerCase();
+    const truncatedNotes = notes ? String(notes).trim().substring(0, 450) : "";
 
     const paymentIntent = await stripe.paymentIntents.create({
       amount: Math.round(price * 100),
-      currency: currency.toLowerCase(),
+      currency,
       metadata: {
         eventTypeId,
-        attendeeEmail: attendeeEmail || "",
-        attendeeName: attendeeName || "",
-        startTime: startTime || "",
-        endTime: endTime || "",
-        attendeePhone: attendeePhone || "",
+        hostUserId: eventType.user_id,
+        attendeeEmail: attendeeEmail.trim().toLowerCase(),
+        attendeeName: (attendeeName || "").trim(),
+        startTime: startTime,
+        endTime: endTime,
+        attendeePhone: (attendeePhone || "").trim(),
         notes: truncatedNotes,
         amount: price.toString(),
-        currency: currency,
+        currency: eventType.currency || "USD",
       },
     });
 
