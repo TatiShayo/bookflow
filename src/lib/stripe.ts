@@ -4,9 +4,21 @@ let _stripe: Stripe | null = null;
 
 export function getStripe(): Stripe {
   if (!_stripe) {
-    const key = process.env.STRIPE_SECRET_KEY || "your_stripe_secret_key_here";
+    const key = process.env.STRIPE_SECRET_KEY;
+    // Fail fast rather than silently constructing a client that will 401 on
+    // every call with a confusing "invalid API key" from Stripe.
+    if (!key) {
+      throw new Error(
+        "STRIPE_SECRET_KEY is not set. Add it to your environment (see .env.example)."
+      );
+    }
     _stripe = new Stripe(key, {
-      apiVersion: "2026-05-27.dahlia" as unknown as Stripe.LatestApiVersion,
+      // The SDK does not export a `LatestApiVersion` symbol, but it does declare
+      // `static API_VERSION: typeof ApiVersion`, which is the version-literal
+      // union. Casting to that keeps the explicit pin while satisfying the
+      // type checker. Letting this go stale silently pins the account to the
+      // SDK's bundled default.
+      apiVersion: "2026-05-27.dahlia" as typeof Stripe.API_VERSION,
     });
   }
   return _stripe;

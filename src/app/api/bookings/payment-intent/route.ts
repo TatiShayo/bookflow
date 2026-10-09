@@ -1,9 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createHash } from "crypto";
 import { stripe } from "@/lib/stripe";
 import { createServiceClient } from "@/lib/supabase/server";
 import { isValidEmail } from "@/lib/validation";
+import { rateLimitOr } from "@/lib/rate-limit";
 
 export async function POST(req: NextRequest) {
+  // This route is unauthenticated (guests have no session) and creates live
+  // Stripe PaymentIntents, so it must be rate limited per client.
+  const limited = rateLimitOr(req, "paymentIntent");
+  if (limited) return limited.response;
+
   try {
     const body = await req.json();
     const { eventTypeId, attendeeEmail, attendeeName, startTime, endTime, attendeePhone, notes } = body;
@@ -55,22 +62,32 @@ export async function POST(req: NextRequest) {
     const currency = (eventType.currency || "USD").toLowerCase();
     const truncatedNotes = notes ? String(notes).trim().substring(0, 450) : "";
 
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(price * 100),
-      currency,
-      metadata: {
-        eventTypeId,
-        hostUserId: eventType.user_id,
-        attendeeEmail: attendeeEmail.trim().toLowerCase(),
-        attendeeName: (attendeeName || "").trim(),
-        startTime: startTime,
-        endTime: endTime,
-        attendeePhone: (attendeePhone || "").trim(),
-        notes: truncatedNotes,
-        amount: price.toString(),
-        currency: eventType.currency || "USD",
+    // Idempotency key derived from the inputs the client actually controls.
+    // A double-tap (or a retried request) resolves to the same PaymentIntent
+    // instead of minting a second one.
+    const idempotencyKey = createHash("sha256")
+      .update(`${eventTypeId}|${attendeeEmail.trim().toLowerCase()}|${startTime}|${endTime}`)
+      .digest("hex");
+
+    const paymentIntent = await stripe.paymentIntents.create(
+      {
+        amount: Math.round(price * 100),
+        currency,
+        metadata: {
+          eventTypeId,
+          hostUserId: eventType.user_id,
+          attendeeEmail: attendeeEmail.trim().toLowerCase(),
+          attendeeName: (attendeeName || "").trim(),
+          startTime: startTime,
+          endTime: endTime,
+          attendeePhone: (attendeePhone || "").trim(),
+          notes: truncatedNotes,
+          amount: price.toString(),
+          currency: eventType.currency || "USD",
+        },
       },
-    });
+      { idempotencyKey }
+    );
 
     return NextResponse.json({ clientSecret: paymentIntent.client_secret });
   } catch (err) {

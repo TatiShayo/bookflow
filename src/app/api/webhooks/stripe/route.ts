@@ -4,6 +4,9 @@ import { createServiceClient } from "@/lib/supabase/server";
 import Stripe from "stripe";
 import { parseISO, isValid } from "date-fns";
 import { sendBookingConfirmation } from "@/lib/resend";
+import { generateCancellationToken } from "@/lib/cancellation-token";
+import { assertSlotAvailable } from "@/lib/booking-service";
+import { isValidTimezone } from "@/lib/slots";
 
 export async function POST(req: NextRequest) {
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -83,11 +86,64 @@ export async function POST(req: NextRequest) {
                   paymentIntent.amount,
                   paymentIntent.currency
                 );
-                return NextResponse.json({ error: "Amount or currency mismatch" }, { status: 400 });
+                // 200 (not 400/500): a permanently-invalid payload should not be
+                // retried forever. Logged for alerting.
+                return NextResponse.json({ received: true, ignored: "amount_mismatch" });
               }
 
               const amountPaid = eventType.price;
               const truncatedNotes = notes ? String(notes).substring(0, 450) : null;
+
+              // Re-check availability server-side. The webhook previously
+              // created a confirmed booking with only an amount check, so a paid
+              // guest could be confirmed into an already-booked slot.
+              const { data: hostProfile } = await supabase
+                .from("profiles")
+                .select("timezone")
+                .eq("id", eventType.user_id)
+                .maybeSingle();
+              const rawTimezone = (hostProfile as { timezone?: string } | null)?.timezone;
+              const hostTimezone =
+                rawTimezone && isValidTimezone(rawTimezone) ? rawTimezone : "UTC";
+
+              const [{ data: rawAvail }, { data: rawBookings }] = await Promise.all([
+                supabase
+                  .from("availability")
+                  .select("day_of_week, start_time, end_time, is_available")
+                  .eq("user_id", eventType.user_id),
+                supabase
+                  .from("bookings")
+                  .select(
+                    "start_time, end_time, status, event_types(buffer_before_minutes, buffer_after_minutes)"
+                  )
+                  .eq("event_type_id", eventTypeId)
+                  .neq("status", "cancelled"),
+              ]);
+
+              const slotCheck = assertSlotAvailable({
+                startTime,
+                endTime,
+                timezone: hostTimezone,
+                availability: (rawAvail || []) as never,
+                existingBookings: (rawBookings || []) as never,
+                eventType: eventType as never,
+              });
+
+              if (!slotCheck.ok) {
+                console.error(
+                  `Stripe Webhook: slot unavailable for payment ${paymentIntent.id}: ${slotCheck.reason}`
+                );
+                // Refund rather than silently keeping the money.
+                try {
+                  await stripe.refunds.create({
+                    payment_intent: paymentIntent.id,
+                    reason: "requested_by_customer",
+                  });
+                } catch (refundErr) {
+                  console.error("Stripe Webhook: auto-refund failed:", refundErr);
+                }
+                return NextResponse.json({ received: true, ignored: "slot_unavailable" });
+              }
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const { data: rawBooking, error: bookingError } = await (supabase.from("bookings") as any)
@@ -104,6 +160,7 @@ export async function POST(req: NextRequest) {
                   currency: eventType.currency || "USD",
                   notes: truncatedNotes,
                   meeting_link: eventType.location_value || null,
+                  cancellation_token: generateCancellationToken(),
                 })
                 .select("*")
                 .single();
@@ -231,11 +288,18 @@ export async function POST(req: NextRequest) {
       case "charge.refunded": {
         const charge = event.data.object as Stripe.Charge;
         const paymentIntentId = charge.payment_intent as string;
-        if (paymentIntentId && charge.refunded) {
+        const amountRefunded = charge.amount_refunded ?? 0;
+        const amountCharged = charge.amount ?? 0;
+        const isFullyRefunded = amountCharged > 0 && amountRefunded >= amountCharged;
+        // `charge.refunded` also fires on PARTIAL refunds. Cancelling the booking
+        // on a 50% courtesy refund silently voids the host's record, so only act
+        // when the charge has been refunded in full.
+        if (paymentIntentId && isFullyRefunded) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           await (supabase.from("bookings") as any)
             .update({ status: "cancelled" })
-            .eq("stripe_payment_intent_id", paymentIntentId);
+            .eq("stripe_payment_intent_id", paymentIntentId)
+            .neq("status", "cancelled");
         }
         break;
       }

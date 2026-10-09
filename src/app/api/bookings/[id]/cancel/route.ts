@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient as createServerAuthClient, createServiceClient } from "@/lib/supabase/server";
 import { sendCancellationEmail } from "@/lib/resend";
-import { canCancelBooking, calculateCancellationRefund, DEFAULT_CANCELLATION_POLICY } from "@/lib/cancellation";
+import {
+  canCancelBooking,
+  calculateCancellationRefund,
+  DEFAULT_CANCELLATION_POLICY,
+  isAuthorizedToCancel,
+} from "@/lib/cancellation";
 import { createRefund } from "@/lib/stripe";
+import { rateLimitOr } from "@/lib/rate-limit";
 import { format, parseISO, isValid } from "date-fns";
 
 export async function POST(
@@ -14,6 +20,10 @@ export async function POST(
     if (!id || typeof id !== "string") {
       return NextResponse.json({ error: "Invalid booking ID" }, { status: 400 });
     }
+
+    // Cancellation can trigger a Stripe refund — rate limit it.
+    const limited = rateLimitOr(request, "bookingCancel");
+    if (limited) return limited.response;
 
     let body: Record<string, unknown> = {};
     try {
@@ -29,10 +39,11 @@ export async function POST(
 
     const supabase = createServiceClient();
 
-    // Fetch booking
+    // Fetch booking — include the stored cancellation token so it can be
+    // compared against the caller-supplied one.
     const { data: rawBooking, error: bookingFetchError } = await supabase
       .from("bookings")
-      .select("id, event_type_id, attendee_name, attendee_email, start_time, end_time, status, stripe_payment_intent_id, amount_paid, currency")
+      .select("id, event_type_id, attendee_name, attendee_email, start_time, end_time, status, stripe_payment_intent_id, amount_paid, currency, cancellation_token")
       .eq("id", id)
       .single();
 
@@ -51,6 +62,7 @@ export async function POST(
       stripe_payment_intent_id: string | null;
       amount_paid: number;
       currency: string;
+      cancellation_token: string | null;
     };
 
     // Fetch Event Type and Host Profile
@@ -65,9 +77,11 @@ export async function POST(
 
     // Check authorization: Authenticated host OR matching attendee
     let isHost = false;
+    let user: { id: string } | null = null;
     try {
       const authClient = await createServerAuthClient();
-      const { data: { user } } = await authClient.auth.getUser();
+      const { data } = await authClient.auth.getUser();
+      user = data.user ? { id: data.user.id } : null;
       if (user && hostUserId && user.id === hostUserId) {
         isHost = true;
       }
@@ -75,9 +89,19 @@ export async function POST(
       // Unauthenticated caller
     }
 
-    const isAttendee =
-      (attendeeEmail && attendeeEmail.toLowerCase().trim() === booking.attendee_email.toLowerCase().trim()) ||
-      (cancellationToken && cancellationToken.trim() !== "");
+    // Authorization: authenticated host, OR an attendee presenting a token that
+    // matches the one issued when the booking was created.
+    //
+    // SECURITY: the previous implementation accepted ANY non-empty
+    // `cancellationToken`, which let an unauthenticated caller who knew a booking
+    // id cancel it and trigger a Stripe refund. `isAuthorizedToCancel` requires an
+    // exact match against the stored token.
+    const isAttendee = isAuthorizedToCancel(
+      hostUserId ?? "",
+      user?.id ?? null,
+      cancellationToken,
+      booking.cancellation_token
+    );
 
     if (!isHost && !isAttendee) {
       return NextResponse.json(

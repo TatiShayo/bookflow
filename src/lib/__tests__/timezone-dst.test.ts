@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import {
   formatSlotTime,
   formatTime,
@@ -184,5 +184,119 @@ describe("Timezone & DST Conversion Suite", () => {
       expect(formattedNY).toContain("Jun");
       expect(formattedNY).toContain("30");
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Regression: slot *instants* must be computed in the HOST's timezone.
+  //
+  // The original implementation built the availability window with
+  // setHours(startOfDay(date), sh), which interprets sh in the SERVER's local
+  // zone. On a UTC host that made a 09:00 window for an Asia/Tokyo host become
+  // 09:00 UTC (18:00 Tokyo).
+  //
+  // These tests assert the absolute instant, not a formatted string, so a
+  // regression cannot pass by luck. Availability covers all seven days so the
+  // assertions isolate timezone handling from weekday selection.
+  // ---------------------------------------------------------------------------
+  describe("generateSlots builds slot instants in the host timezone", () => {
+    const availability: Availability[] = Array.from({ length: 7 }, (_, day) => ({
+      id: "av-tz-" + day,
+      user_id: "host-1",
+      day_of_week: day,
+      start_time: "09:00",
+      end_time: "10:00",
+      is_available: true,
+    }));
+
+    // [timezone, an instant that is 2026-06-10 LOCAL in that zone, expected slot instant]
+    // The input instant must fall on the intended local calendar date, otherwise
+    // generateSlots selects a different weekday window.
+    const cases = [
+      ["UTC", "2026-06-10T12:00:00.000Z", "2026-06-10T09:00:00.000Z"],
+      ["Asia/Tokyo", "2026-06-10T06:00:00.000Z", "2026-06-10T00:00:00.000Z"],
+      ["Asia/Dubai", "2026-06-10T06:00:00.000Z", "2026-06-10T05:00:00.000Z"],
+      ["Asia/Kolkata", "2026-06-10T06:00:00.000Z", "2026-06-10T03:30:00.000Z"],
+      ["Europe/Berlin", "2026-06-10T06:00:00.000Z", "2026-06-10T07:00:00.000Z"],
+      ["America/New_York", "2026-06-10T12:00:00.000Z", "2026-06-10T13:00:00.000Z"],
+      ["America/Los_Angeles", "2026-06-10T15:00:00.000Z", "2026-06-10T16:00:00.000Z"],
+      ["Pacific/Auckland", "2026-06-10T00:00:00.000Z", "2026-06-09T21:00:00.000Z"],
+    ];
+
+    for (const [tz, dateUtc, expectedUtc] of cases) {
+      it("09:00 in " + tz + " resolves to " + expectedUtc, () => {
+        const slots = generateSlots(new Date(dateUtc), availability, [], baseEventType, {
+          timezone: tz,
+          now: new Date("2026-01-01T00:00:00.000Z"),
+        });
+        expect(slots).toHaveLength(1);
+        expect(slots[0].start.toISOString()).toBe(expectedUtc);
+        // Round-trip: read back in the host's own zone.
+        expect(formatTime(slots[0].start, tz)).toBe("9:00 AM");
+        expect(formatDate(slots[0].start, tz)).toContain("10");
+      });
+    }
+
+    it("an invalid timezone degrades to the host machine local zone", () => {
+      const slots = generateSlots(new Date("2026-06-10T12:00:00.000Z"), availability, [], baseEventType, {
+        timezone: "Mars/Olympus_Mons",
+        now: new Date("2026-01-01T00:00:00.000Z"),
+      });
+      expect(slots).toHaveLength(1);
+      expect(formatTime(slots[0].start, undefined)).toBe("9:00 AM");
+    });
+
+    // Across a DST transition the wall-clock time must stay 09:00 local, which
+    // means the UTC instant must shift by exactly one hour.
+    const dstCases = [
+      {
+        name: "US spring-forward",
+        tz: "America/New_York",
+        before: ["2026-03-07", "2026-03-07T14:00:00.000Z"],
+        after: ["2026-03-10", "2026-03-10T13:00:00.000Z"],
+      },
+      {
+        name: "US fall-back",
+        tz: "America/New_York",
+        before: ["2026-10-30", "2026-10-30T13:00:00.000Z"],
+        after: ["2026-11-02", "2026-11-02T14:00:00.000Z"],
+      },
+      {
+        name: "EU spring-forward",
+        tz: "Europe/Berlin",
+        before: ["2026-03-27", "2026-03-27T08:00:00.000Z"],
+        after: ["2026-03-30", "2026-03-30T07:00:00.000Z"],
+      },
+      {
+        name: "EU fall-back",
+        tz: "Europe/Berlin",
+        before: ["2026-10-23", "2026-10-23T07:00:00.000Z"],
+        after: ["2026-10-26", "2026-10-26T08:00:00.000Z"],
+      },
+    ];
+
+    for (const { name, tz, before, after } of dstCases) {
+      it("09:00 stays 09:00 across " + name + " (" + tz + ")", () => {
+        const opts = { timezone: tz, now: new Date("2026-01-01T00:00:00.000Z") };
+        const beforeSlots = generateSlots(
+          new Date(before[0] + "T06:00:00.000Z"),
+          availability,
+          [],
+          baseEventType,
+          opts
+        );
+        const afterSlots = generateSlots(
+          new Date(after[0] + "T06:00:00.000Z"),
+          availability,
+          [],
+          baseEventType,
+          opts
+        );
+        expect(beforeSlots[0].start.toISOString()).toBe(before[1]);
+        expect(afterSlots[0].start.toISOString()).toBe(after[1]);
+        // Both must read as 09:00 local despite the shifted instant.
+        expect(formatTime(beforeSlots[0].start, tz)).toBe("9:00 AM");
+        expect(formatTime(afterSlots[0].start, tz)).toBe("9:00 AM");
+      });
+    }
   });
 });

@@ -54,6 +54,73 @@ export function getZonedDateString(date: Date, timezone?: string): string {
 }
 
 /**
+ * Offset in milliseconds between `timeZone` wall-clock and UTC, evaluated at the
+ * instant `date`. DST-aware: the offset is derived from the actual instant, not
+ * from a static table.
+ */
+function getTimeZoneOffsetMs(timeZone: string, date: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(date);
+
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? "0");
+  const asUtcMs = Date.UTC(
+    get("year"),
+    get("month") - 1,
+    get("day"),
+    get("hour") % 24, // Intl can emit hour "24" for midnight in some ICU builds
+    get("minute"),
+    get("second")
+  );
+  // Truncate to whole seconds so sub-second drift cannot accumulate.
+  return asUtcMs - Math.floor(date.getTime() / 1000) * 1000;
+}
+
+/**
+ * Converts a wall-clock time on a zoned calendar day into the matching UTC
+ * instant.
+ *
+ * `zonedDateStr` is a `YYYY-MM-DD` calendar date as observed in `timeZone` (see
+ * `getZonedDateString`), and `hours`/`minutes` are wall-clock in that same zone.
+ *
+ * Two passes resolve the DST boundary: the offset is measured at the naive
+ * instant, then re-measured at the corrected instant. For a 09:00 availability
+ * window this returns 09:00 in `timeZone` regardless of the server's own zone.
+ */
+export function zonedWallClockToUtc(
+  zonedDateStr: string,
+  hours: number,
+  minutes: number,
+  timeZone?: string
+): Date {
+  const [y, mo, d] = zonedDateStr.split("-").map(Number);
+
+  // Without a timezone, interpret in the host's LOCAL zone — matching the
+  // original `setHours(startOfDay(date), …)` semantics that callers without a
+  // host timezone depend on. `new Date(y, m, d, …)` is local by construction.
+  if (!timeZone || !isValidTimezone(timeZone)) {
+    return new Date(y, (mo ?? 1) - 1, d ?? 1, hours, minutes, 0, 0);
+  }
+  const naiveUtcMs = Date.UTC(y, (mo ?? 1) - 1, d ?? 1, hours, minutes, 0, 0);
+
+  let ts = naiveUtcMs;
+  for (let pass = 0; pass < 2; pass++) {
+    const offsetMs = getTimeZoneOffsetMs(timeZone, new Date(ts));
+    const next = naiveUtcMs - offsetMs;
+    if (next === ts) break; // converged
+    ts = next;
+  }
+  return new Date(ts);
+}
+
+/**
  * Returns the day of week (0=Sun, 1=Mon, ..., 6=Sat) in the specified timezone.
  */
 export function getZonedDayOfWeek(date: Date, timezone?: string): number {
@@ -196,9 +263,13 @@ export function generateSlots(
       continue; // Invalid or inverted window
     }
 
-    const dayStart = startOfDay(date);
-    const windowStart = setMilliseconds(setSeconds(setMinutes(setHours(dayStart, sh), sm), 0), 0);
-    const windowEnd = setMilliseconds(setSeconds(setMinutes(setHours(dayStart, eh), em), 0), 0);
+    // Build the availability window in the HOST's timezone. The previous
+    // implementation used `setHours(startOfDay(date), sh)`, which interprets
+    // `sh` in the SERVER's local zone — so on a UTC host (Vercel), a 09:00
+    // window for an Asia/Tokyo host silently became 09:00 UTC.
+    const zonedDay = getZonedDateString(date, timezone);
+    const windowStart = zonedWallClockToUtc(zonedDay, sh, sm, timezone);
+    const windowEnd = zonedWallClockToUtc(zonedDay, eh, em, timezone);
 
     let cursor = windowStart;
     while (differenceInMinutes(windowEnd, cursor) >= totalSlotFootprint) {

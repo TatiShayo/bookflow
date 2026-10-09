@@ -91,14 +91,36 @@ create table bookings (
   currency text default 'USD',
   notes text,
   meeting_link text,
+  -- Opaque token handed to the attendee at booking time. Required to cancel
+  -- without an authenticated session; compared with an exact match, never a
+  -- truthiness check.
+  cancellation_token text unique,
   created_at timestamptz default now()
 );
+
+-- DB-level guarantee against double-booking. The API route re-reads all bookings
+-- into memory before inserting, which loses the race to any concurrent request;
+-- this constraint is the only real guard.
+create extension if not exists btree_gist;
+alter table bookings drop constraint if exists no_double_booking;
+alter table bookings add constraint no_double_booking
+  exclude using gist (
+    event_type_id with =,
+    tstzrange(start_time, end_time) with &&
+  ) where (status <> 'cancelled');
 
 alter table profiles enable row level security;
 alter table event_types enable row level security;
 alter table availability enable row level security;
 alter table blocked_dates enable row level security;
 alter table bookings enable row level security;
+-- `subscriptions` was created without RLS, leaving every row readable by the
+-- anon role. Enable it alongside the others.
+alter table subscriptions enable row level security;
+
+-- Subscriptions: owner-only (there is no public read path for billing state).
+drop policy if exists "Users own their subscriptions" on subscriptions;
+create policy "Users own their subscriptions" on subscriptions for all using (auth.uid() = user_id);
 
 -- Profiles: owners full access, public can read (for booking page)
 create policy "Users own their data select" on profiles for select using (auth.uid() = id);

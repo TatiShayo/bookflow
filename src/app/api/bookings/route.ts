@@ -1,13 +1,21 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
 import { sendBookingConfirmation, sendHostNotification } from "@/lib/resend";
-import { generateSlots, getZonedDateString, isValidTimezone } from "@/lib/slots";
+import { getZonedDateString, isValidTimezone } from "@/lib/slots";
 import { validateBookingInput } from "@/lib/validation";
 import { parseISO, isValid } from "date-fns";
 import type { Availability, Booking, EventType, Profile } from "@/lib/types";
 import { stripe } from "@/lib/stripe";
+import { generateCancellationToken } from "@/lib/cancellation-token";
+import { assertSlotAvailable } from "@/lib/booking-service";
+import { rateLimitOr } from "@/lib/rate-limit";
 
 export async function POST(req: NextRequest) {
+  // Rate limit booking creation: the route is unauthenticated and does
+  // Stripe verification plus several DB round-trips.
+  const limited = rateLimitOr(req, "bookingCreate");
+  if (limited) return limited.response;
+
   try {
     const body = await req.json();
     const {
@@ -122,40 +130,19 @@ export async function POST(req: NextRequest) {
       rawBookings = bookingsData || [];
     }
 
-    // 7. Verify slot availability with buffer & max_bookings_per_day
-    const slots = generateSlots(
-      startDate,
-      (rawAvail || []) as unknown as Availability[],
-      (rawBookings || []) as unknown as Booking[],
-      eventType,
-      { timezone: hostTimezone }
-    );
+    // 7. Verify slot availability with buffer & max_bookings_per_day.
+    // Shared with the Stripe webhook so both paths enforce identical rules.
+    const slotCheck = assertSlotAvailable({
+      startTime,
+      endTime,
+      timezone: hostTimezone,
+      availability: (rawAvail || []) as unknown as Availability[],
+      existingBookings: (rawBookings || []) as unknown as Booking[],
+      eventType: eventType as unknown as EventType,
+    });
 
-    const requestedStart = parseISO(startTime);
-    const requestedEnd = parseISO(endTime);
-    const slotAvailable = slots.some(
-      (s) => s.start.getTime() === requestedStart.getTime() && s.end.getTime() === requestedEnd.getTime()
-    );
-
-    if (!slotAvailable) {
-      return NextResponse.json(
-        { error: "This time slot is no longer available." },
-        { status: 409 }
-      );
-    }
-
-    // 8. Enforce Max Bookings Per Day if set
-    if (eventType.max_bookings_per_day && eventType.max_bookings_per_day > 0) {
-      const targetDateStr = getZonedDateString(startDate, hostTimezone);
-      const activeBookingsCount = (rawBookings as unknown as Booking[]).filter((b) => {
-        if (b.status === "cancelled") return false;
-        const bDate = parseISO(b.start_time);
-        return isValid(bDate) && getZonedDateString(bDate, hostTimezone) === targetDateStr;
-      }).length;
-
-      if (activeBookingsCount >= eventType.max_bookings_per_day) {
-        return NextResponse.json({ error: "This day is fully booked." }, { status: 409 });
-      }
+    if (!slotCheck.ok) {
+      return NextResponse.json({ error: slotCheck.reason }, { status: 409 });
     }
 
     // 9. Stripe Payment Verification & Replay Protection
@@ -216,6 +203,11 @@ export async function POST(req: NextRequest) {
       verifiedCurrency = eventType.currency || "USD";
     }
 
+    // Mint the attendee's cancellation credential once, before the insert, so it
+    // is stable for the life of the booking and can be returned in the response
+    // and emailed.
+    const cancellationToken = generateCancellationToken();
+
     // 10. Atomic Insert of the Booking
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: rawBooking, error: bookingError } = await (supabase.from("bookings") as any)
@@ -232,6 +224,7 @@ export async function POST(req: NextRequest) {
         currency: verifiedCurrency,
         notes: notes ? String(notes).trim().substring(0, 500) : null,
         meeting_link: eventType.location_value || null,
+        cancellation_token: cancellationToken,
       })
       .select("*")
       .single();
@@ -265,19 +258,46 @@ export async function POST(req: NextRequest) {
       timeZoneName: "short",
     }).format(startDate);
 
-    Promise.allSettled([
-      sendBookingConfirmation(attendeeEmail.trim(), {
-        attendeeName: attendeeName.trim(),
-        hostName: hostProfile.display_name || "Host",
-        eventTitle: eventType.title,
-        date: dateFormatted,
-        time: timeFormatted,
-        duration: eventType.duration_minutes,
-        joinLink: eventType.location_value || undefined,
-        amount: verifiedAmountPaid || undefined,
-        currency: verifiedCurrency || undefined,
-      }),
-    ]).catch((e) => console.error("Email delivery error:", e));
+    // Deferred until after the response is sent. Using `after()` (stable in
+    // Next 15/16) instead of a floating promise guarantees the work runs in the
+    // platform's post-response phase; a bare floating promise can be frozen
+    // mid-send on serverless, losing the email with no retry.
+    after(async () => {
+      try {
+        await sendBookingConfirmation(attendeeEmail.trim(), {
+          attendeeName: attendeeName.trim(),
+          hostName: hostProfile.display_name || "Host",
+          eventTitle: eventType.title,
+          date: dateFormatted,
+          time: timeFormatted,
+          duration: eventType.duration_minutes,
+          joinLink: eventType.location_value || undefined,
+          amount: verifiedAmountPaid || undefined,
+          currency: verifiedCurrency || undefined,
+        });
+
+        // Host notification. The email is not on `profiles` (it lives in
+        // auth.users), so it must be read through the admin API.
+        try {
+          const { data: hostAuth } = await createServiceClient().auth.admin.getUserById(
+            eventType.user_id
+          );
+          if (hostAuth?.user?.email) {
+            await sendHostNotification(hostAuth.user.email, {
+              attendeeName: attendeeName.trim(),
+              eventTitle: eventType.title,
+              date: dateFormatted,
+              time: timeFormatted,
+              attendeeEmail: attendeeEmail.trim(),
+            });
+          }
+        } catch (hostEmailErr) {
+          console.error("Host notification skipped:", hostEmailErr);
+        }
+      } catch (e) {
+        console.error("Email delivery error:", e);
+      }
+    });
 
     return NextResponse.json({ booking }, { status: 201 });
   } catch (err) {
