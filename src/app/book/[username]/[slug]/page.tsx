@@ -42,7 +42,6 @@ export default async function BookEventPage({
     .select("blocked_date")
     .eq("user_id", profile.id as string);
 
-  // Fetch all event types of the host to include all their bookings for conflict prevention
   const { data: allHostEvents } = await supabase
     .from("event_types")
     .select("id")

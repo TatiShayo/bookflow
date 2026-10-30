@@ -33,7 +33,6 @@ export async function POST(req: NextRequest) {
 
     const supabase = createServiceClient();
 
-    // 1. Fetch Event Type
     if (!eventTypeId || typeof eventTypeId !== "string") {
       return NextResponse.json({ error: "Event type ID is required" }, { status: 400 });
     }
@@ -50,7 +49,6 @@ export async function POST(req: NextRequest) {
     }
     const eventType = rawEvent as unknown as EventType;
 
-    // 2. Validate booking inputs
     const validation = validateBookingInput(
       {
         eventTypeId,
@@ -74,7 +72,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. Get Host Profile to check Timezone & Email
     const { data: rawHost } = await supabase
       .from("profiles")
       .select("id, display_name, timezone")
@@ -88,7 +85,6 @@ export async function POST(req: NextRequest) {
 
     const hostTimezone = isValidTimezone(hostProfile.timezone) ? hostProfile.timezone : "UTC";
 
-    // 4. Timezone-aware Blocked Dates Check
     const startDate = parseISO(startTime);
     if (!isValid(startDate)) {
       return NextResponse.json({ error: "Invalid start time date format" }, { status: 400 });
@@ -106,13 +102,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "This date is blocked by the host." }, { status: 409 });
     }
 
-    // 5. Fetch host availability
     const { data: rawAvail } = await supabase
       .from("availability")
       .select("*")
       .eq("user_id", eventType.user_id);
 
-    // 6. Fetch ALL event types for this host to prevent cross-event double bookings
     const { data: rawHostEvents } = await supabase
       .from("event_types")
       .select("id")
@@ -130,7 +124,6 @@ export async function POST(req: NextRequest) {
       rawBookings = bookingsData || [];
     }
 
-    // 7. Verify slot availability with buffer & max_bookings_per_day.
     // Shared with the Stripe webhook so both paths enforce identical rules.
     const slotCheck = assertSlotAvailable({
       startTime,
@@ -145,7 +138,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: slotCheck.reason }, { status: 409 });
     }
 
-    // 9. Stripe Payment Verification & Replay Protection
     let verifiedPaymentIntentId: string | null = null;
     let verifiedAmountPaid = 0;
     let verifiedCurrency = eventType.currency || "USD";
@@ -180,7 +172,6 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "Payment intent event type mismatch." }, { status: 400 });
       }
 
-      // Check if PaymentIntent was already attached to a booking
       const { data: existingPaymentBooking } = await supabase
         .from("bookings")
         .select("id")
@@ -208,7 +199,6 @@ export async function POST(req: NextRequest) {
     // and emailed.
     const cancellationToken = generateCancellationToken();
 
-    // 10. Atomic Insert of the Booking
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: rawBooking, error: bookingError } = await (supabase.from("bookings") as any)
       .insert({
@@ -242,7 +232,6 @@ export async function POST(req: NextRequest) {
 
     const booking = rawBooking as unknown as Booking;
 
-    // 11. Send Confirmation and Notification Emails Asynchronously
     const dateFormatted = new Intl.DateTimeFormat("en-US", {
       weekday: "long",
       month: "long",

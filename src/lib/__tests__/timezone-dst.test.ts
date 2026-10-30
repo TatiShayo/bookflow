@@ -186,18 +186,14 @@ describe("Timezone & DST Conversion Suite", () => {
     });
   });
 
-  // ---------------------------------------------------------------------------
   // Regression: slot *instants* must be computed in the HOST's timezone.
-  //
   // The original implementation built the availability window with
   // setHours(startOfDay(date), sh), which interprets sh in the SERVER's local
   // zone. On a UTC host that made a 09:00 window for an Asia/Tokyo host become
   // 09:00 UTC (18:00 Tokyo).
-  //
   // These tests assert the absolute instant, not a formatted string, so a
   // regression cannot pass by luck. Availability covers all seven days so the
   // assertions isolate timezone handling from weekday selection.
-  // ---------------------------------------------------------------------------
   describe("generateSlots builds slot instants in the host timezone", () => {
     const availability: Availability[] = Array.from({ length: 7 }, (_, day) => ({
       id: "av-tz-" + day,

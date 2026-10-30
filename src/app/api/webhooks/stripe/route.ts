@@ -55,7 +55,6 @@ export async function POST(req: NextRequest) {
           const notes = metadata.notes || null;
 
           if (eventTypeId && attendeeName && attendeeEmail && startTime && endTime) {
-            // Get event type details
             const { data: rawEvent } = await supabase
               .from("event_types")
               .select("*")
@@ -175,7 +174,6 @@ export async function POST(req: NextRequest) {
               } else if (rawBooking) {
                 console.log("Stripe Webhook: Successfully created booking:", rawBooking.id);
 
-                // Get host profile
                 const { data: rawHost } = await supabase
                   .from("profiles")
                   .select("display_name, timezone")

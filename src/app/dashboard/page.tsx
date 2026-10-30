@@ -26,7 +26,6 @@ export default async function DashboardPage() {
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const monthAgo = new Date(now.getTime() - 30 * 86400000);
 
-  // Get user's event_type ids first
   const { data: userEventTypes } = await supabase
     .from("event_types")
     .select("id")

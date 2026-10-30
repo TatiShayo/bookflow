@@ -35,7 +35,6 @@ export function SignupForm() {
     }
 
     if (data.user) {
-      // Create profile
       await supabase.from("profiles").insert({
         id: data.user.id,
         display_name: name,

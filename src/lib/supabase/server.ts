@@ -25,7 +25,6 @@ export async function createClient() {
           try {
             cookieStore.set({ name, value: "", ...options });
           } catch {
-            // remove may fail in middleware, ignore
           }
         },
       },

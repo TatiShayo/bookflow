@@ -39,7 +39,6 @@ export async function POST(
 
     const supabase = createServiceClient();
 
-    // Fetch booking — include the stored cancellation token so it can be
     // compared against the caller-supplied one.
     const { data: rawBooking, error: bookingFetchError } = await supabase
       .from("bookings")
@@ -65,7 +64,6 @@ export async function POST(
       cancellation_token: string | null;
     };
 
-    // Fetch Event Type and Host Profile
     const { data: rawEvent } = await supabase
       .from("event_types")
       .select("title, user_id")
@@ -91,7 +89,6 @@ export async function POST(
 
     // Authorization: authenticated host, OR an attendee presenting a token that
     // matches the one issued when the booking was created.
-    //
     // SECURITY: the previous implementation accepted ANY non-empty
     // `cancellationToken`, which let an unauthenticated caller who knew a booking
     // id cancel it and trigger a Stripe refund. `isAuthorizedToCancel` requires an
@@ -158,7 +155,6 @@ export async function POST(
       }
     }
 
-    // Update status in DB
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { error: updateError } = await (supabase.from("bookings") as any)
       .update({ status: "cancelled" })
@@ -169,7 +165,6 @@ export async function POST(
       return NextResponse.json({ error: "Failed to cancel booking" }, { status: 500 });
     }
 
-    // Fetch Host details for email
     const { data: rawHost } = await supabase
       .from("profiles")
       .select("display_name, timezone")

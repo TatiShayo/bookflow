@@ -98,7 +98,6 @@ export function AvailabilityClient({ userId, grouped, days, blocked }: Props) {
       }
     }
 
-    // Validate availability windows
     const validation = validateAvailabilityWindows(toInsert);
     if (!validation.isValid) {
       toast.error(validation.errors[0] || "Invalid availability window");
@@ -106,7 +105,6 @@ export function AvailabilityClient({ userId, grouped, days, blocked }: Props) {
       return;
     }
 
-    // Delete all existing availability and blocked dates for this user, then re-insert
     await supabase.from("availability").delete().eq("user_id", userId);
     await supabase.from("blocked_dates").delete().eq("user_id", userId);
 

@@ -224,7 +224,6 @@ export function generateSlots(
     }
   }
 
-  // Get matching availability windows for the day of week
   const dayOfWeek = getZonedDayOfWeek(date, timezone);
   const dayWindows = availabilities.filter(
     (a) => a.day_of_week === dayOfWeek && a.is_available
